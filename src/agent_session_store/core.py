@@ -56,6 +56,9 @@ class SessionStore:
     Args:
         directory: path to the session store directory (created if missing).
         id_length: number of hex chars in auto-generated session IDs (8..32).
+        strict: if True, ``load`` raises on a corrupted/partial JSONL line.
+            If False (the default), such lines are skipped so that a session
+            torn by a crash mid-append still loads every complete message.
 
     Example::
 
@@ -73,10 +76,12 @@ class SessionStore:
         directory: str | Path,
         *,
         id_length: int = 12,
+        strict: bool = False,
     ) -> None:
         self.directory = Path(directory).expanduser()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.id_length = max(8, min(32, id_length))
+        self.strict = strict
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -169,11 +174,16 @@ class SessionStore:
     def load(self, session_id: str) -> Session:
         """Load a session from disk.
 
+        Corrupted or partially written lines (for example, a torn final line
+        left by a crash mid-append) are skipped unless the store was created
+        with ``strict=True``.
+
         Returns:
             Session object with messages and merged metadata.
 
         Raises:
-            SessionStoreError: if the session does not exist.
+            SessionStoreError: if the session does not exist, or if a line is
+                malformed and the store is in ``strict`` mode.
         """
         path = self._path(session_id)
         if not path.exists():
@@ -207,11 +217,27 @@ class SessionStore:
         created_at: float | None = None
         updated_at: float | None = None
 
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        for lineno, raw in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            line = raw.strip()
             if not line:
                 continue
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if self.strict:
+                    raise SessionStoreError(
+                        f"corrupted line {lineno} in session {session_id!r}: {exc}"
+                    ) from exc
+                # Tolerant mode: skip a torn/partial line (e.g. crash mid-write).
+                continue
+            if not isinstance(entry, dict):
+                if self.strict:
+                    raise SessionStoreError(
+                        f"non-object line {lineno} in session {session_id!r}"
+                    )
+                continue
             ts = entry.get("ts", 0.0)
             if created_at is None:
                 created_at = ts
@@ -224,7 +250,13 @@ class SessionStore:
                 if "meta" in entry:
                     meta.update(entry["meta"])
             elif event == "message":
-                messages.append(entry["message"])
+                if "message" in entry:
+                    messages.append(entry["message"])
+                elif self.strict:
+                    raise SessionStoreError(
+                        f"message event without payload on line {lineno} "
+                        f"in session {session_id!r}"
+                    )
 
         return Session(
             session_id=session_id,
