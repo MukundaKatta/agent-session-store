@@ -65,6 +65,43 @@ session.updated_at      # Unix timestamp
 
 Messages are appended to disk immediately — if the process crashes mid-session, all messages up to the crash are preserved.
 
+A crash can leave a **partial final line** in the JSONL file (a torn write). By
+default, `load()` tolerates this: it skips any corrupted or partially written
+line and returns every complete message. Pass `strict=True` to instead raise a
+`SessionStoreError` when a malformed line is encountered:
+
+```python
+store = SessionStore("~/.agent_sessions", strict=True)  # raise on corruption
+```
+
+## API reference
+
+`SessionStore(directory, *, id_length=12, strict=False)`
+
+| Method | Description |
+| --- | --- |
+| `new(session_id=None, *, meta=None) -> str` | Create a session, return its ID. Raises `SessionStoreError` if the ID already exists. |
+| `add_message(session_id, message, *, meta=None) -> None` | Append a message. Raises if the session is missing. |
+| `set_meta(session_id, **kwargs) -> None` | Merge key/value pairs into the session metadata. |
+| `load(session_id) -> Session` | Read the session back from disk. |
+| `delete(session_id) -> None` | Remove a session permanently. |
+| `exists(session_id) -> bool` | Whether the session exists. |
+| `list_sessions() -> list[str]` | All session IDs, sorted. |
+| `count() -> int` | Number of sessions in the store. |
+
+`Session` is a dataclass with `session_id`, `messages`, `meta`, `created_at`,
+`updated_at`, and a `message_count` property. All operations raise
+`SessionStoreError` on invalid input (missing or duplicate sessions).
+
+## Development
+
+Run the test suite with the standard library only — no third-party
+dependencies are required:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## License
 
 MIT
